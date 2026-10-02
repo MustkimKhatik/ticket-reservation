@@ -1,0 +1,43 @@
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: tickets
+      MARIADB_USER: ticket
+      MARIADB_PASSWORD: ${DB_PASSWORD:-ticket}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-change-this-root-password}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--max-connections=${DB_CONNECTION_LIMIT:-400}"]
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_DSN: "ticket:${DB_PASSWORD:-ticket}@tcp(db:3306)/tickets?parseTime=true&charset=utf8mb4&timeout=3s&readTimeout=5s&writeTimeout=5s"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in the environment}
+      PORT: 8080
+      DB_POOL_MAX_OPEN: ${DB_POOL_MAX_OPEN:-100}
+      DB_POOL_MAX_IDLE: ${DB_POOL_MAX_IDLE:-50}
+      DB_CONNECTION_LIMIT: ${DB_CONNECTION_LIMIT:-400}
+      DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-5m}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:-5s}
+      DB_ACQUIRE_TIMEOUT: ${DB_ACQUIRE_TIMEOUT:-30s}
+      READY_TIMEOUT: ${READY_TIMEOUT:-2s}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-60s}
+      DB_STARTUP_TIMEOUT: ${DB_STARTUP_TIMEOUT:-5s}
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+volumes:
+  mariadb_data:
