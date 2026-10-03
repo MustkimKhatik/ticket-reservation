@@ -155,7 +155,8 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("GET /readyz", a.readyz)
 	mux.HandleFunc("GET /metrics", a.prometheus)
 	mux.HandleFunc("GET /shows/{id}", a.getShow)
-	mux.Handle("POST /shows", a.authenticate(http.HandlerFunc(a.createShow)))
+	mux.Handle("POST /shows", a.authenticate(a.requireAdmin(http.HandlerFunc(a.createShow))))
+	mux.Handle("POST /shows/{id}/reserve", a.authenticate(http.HandlerFunc(a.reserve)))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Route not found")
 	})
@@ -191,6 +192,9 @@ func (a *application) middleware(next http.Handler) http.Handler {
 			}
 			if r.Method == http.MethodPost && r.URL.Path == "/shows" {
 				route = "/shows"
+			}
+			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/shows/") && strings.HasSuffix(r.URL.Path, "/reserve") {
+				route = "/shows/{id}/reserve"
 			}
 			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/shows/") {
 				route = "/shows/{id}"
@@ -237,15 +241,25 @@ func (a *application) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		ident, err := verifyJWT(parts[1], a.cfg.jwtSecret)
-		if err != nil || ident.UserID == "" {
+		if err != nil || ident.UserID == "" || utf8.RuneCountInString(ident.UserID) > 255 {
 			writeError(w, 401, "unauthorized", "A valid bearer token is required")
 			return
 		}
-		if ident.Role != "admin" {
-			writeError(w, 403, "forbidden", "Admin role is required")
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityKey{}, ident)))
+	})
+}
+func (a *application) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ident, ok := r.Context().Value(identityKey{}).(identity)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "A valid bearer token is required")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityKey{}, ident)))
+		if ident.Role != "admin" {
+			writeError(w, http.StatusForbidden, "forbidden", "Admin role is required")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 func verifyJWT(token, secret string) (identity, error) {

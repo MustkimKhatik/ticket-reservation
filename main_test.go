@@ -101,13 +101,13 @@ func TestDatabaseCapacityErrorsAreDeclines(t *testing.T) {
 }
 func TestJWTAuthStatuses(t *testing.T) {
 	a := &application{cfg: config{jwtSecret: "secret"}}
-	handler := a.authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := a.authenticate(a.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		who := r.Context().Value(identityKey{}).(identity)
 		if who.UserID != "u1" {
 			t.Errorf("unexpected identity: %+v", who)
 		}
 		w.WriteHeader(204)
-	}))
+	})))
 	for _, tc := range []struct {
 		name, token string
 		want        int
@@ -136,7 +136,7 @@ func testToken(secret, sub, role string) string {
 
 func TestCreateShowValidation(t *testing.T) {
 	a := &application{cfg: config{jwtSecret: "secret"}}
-	h := a.authenticate(http.HandlerFunc(a.createShow))
+	h := a.authenticate(a.requireAdmin(http.HandlerFunc(a.createShow)))
 	tests := []struct{ name, body string }{{"duplicate", "{\"name\":\"x\",\"seats\":[\"a1\",\"A1\"],\"price_paise\":1}"}, {"float", "{\"name\":\"x\",\"seats\":[\"A1\"],\"price_paise\":250.5}"}, {"string price", "{\"name\":\"x\",\"seats\":[\"A1\"],\"price_paise\":\"250\"}"}, {"empty seats", "{\"name\":\"x\",\"seats\":[],\"price_paise\":1}"}, {"too many", "{\"name\":\"x\",\"seats\":[" + strings.TrimSuffix(strings.Repeat(`"A",`, 50001), ",") + "],\"price_paise\":1}"}}
 	tests = append(tests,
 		struct{ name, body string }{"empty name", `{"name":"  ","seats":["A1"],"price_paise":1}`},
@@ -183,7 +183,7 @@ func TestCreateShowTenThousandSeats(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testToken("secret", "admin", "admin"))
 	rr := httptest.NewRecorder()
 	started := time.Now()
-	a.authenticate(http.HandlerFunc(a.createShow)).ServeHTTP(rr, req)
+	a.authenticate(a.requireAdmin(http.HandlerFunc(a.createShow))).ServeHTTP(rr, req)
 	if rr.Code != 201 {
 		t.Fatalf("got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -294,7 +294,7 @@ func TestCreateShowRollbackOnSeatInsertError(t *testing.T) {
 	req := httptest.NewRequest("POST", "/shows", strings.NewReader(`{"name":"`+name+`","seats":["A1"],"price_paise":1}`))
 	req.Header.Set("Authorization", "Bearer "+testToken("secret", "admin", "admin"))
 	rr := httptest.NewRecorder()
-	a.authenticate(http.HandlerFunc(a.createShow)).ServeHTTP(rr, req)
+	a.authenticate(a.requireAdmin(http.HandlerFunc(a.createShow))).ServeHTTP(rr, req)
 	if rr.Code < 400 {
 		t.Fatalf("expected failure, got %d", rr.Code)
 	}

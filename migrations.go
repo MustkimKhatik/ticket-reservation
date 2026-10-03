@@ -29,6 +29,35 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			INDEX idx_seats_show_status (show_id, status),
 			CONSTRAINT fk_seats_show FOREIGN KEY (show_id) REFERENCES shows(id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE INDEX IF NOT EXISTS idx_seats_show_user_status ON seats (show_id, user_id, status)`,
+		`CREATE TABLE IF NOT EXISTS reservations (
+			id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			show_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			user_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+			amount_paise BIGINT NOT NULL,
+			status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+			PRIMARY KEY (id),
+			INDEX idx_reservations_show_user (show_id, user_id),
+			CONSTRAINT fk_reservations_show FOREIGN KEY (show_id) REFERENCES shows(id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS idempotency_keys (
+			user_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+			idem_key VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+			show_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			request_hash BINARY(32) NOT NULL,
+			response_json JSON NULL,
+			status_code SMALLINT UNSIGNED NULL,
+			created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+			UNIQUE KEY uq_idempotency_user_key (user_id, idem_key),
+			CONSTRAINT fk_idempotency_show FOREIGN KEY (show_id) REFERENCES shows(id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS user_show_locks (
+			show_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			user_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+			PRIMARY KEY (show_id, user_id),
+			CONSTRAINT fk_user_show_locks_show FOREIGN KEY (show_id) REFERENCES shows(id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 	for _, s := range statements {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -1,6 +1,6 @@
 # Ticket reservation foundation
 
-Block 1 is a Go HTTP service using MariaDB with InnoDB. It provides retrying startup migrations, process liveness and database readiness checks, request IDs and JSON logs, Prometheus metrics, HS256 JWT authentication, admin-only `POST /shows`, and a one-query show/seat reconciliation endpoint. Reservation, cancellation, holds, expiry, and idempotency are intentionally not implemented yet.
+The service is a Go HTTP API using MariaDB with InnoDB. It provides retrying startup migrations, process liveness and database readiness checks, request IDs and JSON logs, Prometheus metrics, HS256 JWT authentication, admin-only `POST /shows`, a one-query show/seat reconciliation endpoint, and authenticated atomic reservations. Cancellation and hold creation/expiry are not implemented yet.
 
 ## Deploy with Docker Compose
 
@@ -45,6 +45,30 @@ curl http://localhost:8080/shows/<show-id>
 
 The response includes `available`, `held`, `confirmed`, and `total_seats`. The fields and counts come from one MariaDB statement so the counts share a single InnoDB statement snapshot.
 
+## Reserve seats
+
+An authenticated user may reserve one or more seats with either an `idempotency_key` body field or an `Idempotency-Key` header. If both are supplied they must match. The caller identity is taken from the signed JWT `sub`; any body `user_id` or other unrecognized fields are ignored.
+
+```sh
+curl -X POST "http://localhost:8080/shows/<show-id>/reserve" \
+  -H 'Authorization: Bearer <USER-HS256-JWT>' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: checkout-2026-001' \
+  -d '{"seats":["A1","A2"]}'
+```
+
+The reservation is all-or-nothing: the transaction conditionally updates every requested seat from `available` to `confirmed`; if the affected row count is not the full request size, it rolls back all seat changes and returns 409. A user/show lock serializes per-user limit checks. Transactions use `READ COMMITTED`, with locks acquired in this order: idempotency key row, `(show_id,user_id)` lock row, then requested seat rows in normalized seat-ID order. The transaction performs no external calls.
+
+Successful response shape:
+
+```json
+{"reservation_id":"<uuid>","show_id":"<uuid>","user_id":"<jwt-sub>","seats":["A1","A2"],"amount_paise":50000,"status":"confirmed"}
+```
+
+The idempotency hash is SHA-256 over the show ID and sorted normalized seat IDs. A repeated user/key with the same hash replays the stored 201 response and sets `Idempotent-Replayed: true`; a different hash returns 409 `idempotency_key_conflict`. Only committed reservations are retained as idempotency records. Validation errors and business declines roll back the idempotency row, so a 409 does not permanently make that key replay a stale decline after seat availability changes. Declines therefore are not stored. `reservations_confirmed_total` and the relevant decline metric are incremented only after the commit or final replay/decline decision.
+
+Deadlocks are retried up to three times with jitter after rollback. Lock wait timeouts and exhausted connection capacity return a clean 429; seat conflicts and per-user limit declines return 409. Missing shows/seats return 404. No raw MariaDB errors are sent to clients.
+
 ## Environment
 
 | Variable | Required | Default | Meaning |
@@ -70,7 +94,7 @@ Choose the pool size against the MariaDB `max_connections` budget across all app
 
 Startup creates `shows` and `seats` using InnoDB and utf8mb4. Show IDs are app-generated UUIDs. A show is inserted with its immutable `total_seats`, followed by all seat rows in one transaction. Seat rows have a composite `(show_id, seat_id)` primary key, binary seat collation, and a `(show_id, status)` index. This supports exact seat identity and future row-level conditional updates/ordered locks. No availability counters exist; counts derive from seat rows. A failed seat batch rolls back both the show and its seats. Seat creation is synchronous, batched at 1,000 values per insert, and the response is written only after commit.
 
-The schema includes nullable `user_id`, `reservation_id`, and `held_until` seat fields to support later reservation and hold blocks. It deliberately does not create reservation or idempotency tables in Block 1. Application validation caps shows at 50,000 seats and normalizes seat IDs with trim plus uppercase before duplicate detection and storage. Normalized seat IDs are limited to 16 Unicode characters, matching the `VARCHAR(16)` column.
+The schema includes nullable `user_id`, `reservation_id`, and `held_until` seat fields. `reservations`, `idempotency_keys`, and `user_show_locks` support atomic reservations and future hold/cancel work. There are no seat counter columns; all counts derive from the seat rows. Application validation caps shows at 50,000 seats and normalizes seat IDs with trim plus uppercase before duplicate detection and storage. Normalized seat IDs are limited to 16 Unicode characters, matching the `VARCHAR(16)` column.
 
 ## Local development and tests
 
@@ -81,4 +105,4 @@ go run .
 go test ./...
 ```
 
-HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. The 10,000-seat test verifies HTTP 201, reconciliation counts, readiness, and database-derived metrics; other integration tests check pool wait/decline behavior and transaction rollback.
+HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. Tests cover 10,000-seat creation, reconciliation and metrics, rollback, pool wait behavior, 500-way hot-seat contention, concurrent per-user limits, idempotent replays/conflicts, opposite seat ordering, all-or-nothing multi-seat requests, and JWT identity. They verify the seat-count invariant after each reservation scenario.
