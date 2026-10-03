@@ -205,13 +205,39 @@ func TestCreateShowTenThousandSeats(t *testing.T) {
 	showReq := httptest.NewRequest("GET", "/shows/"+out.ID, nil)
 	showReq.SetPathValue("id", out.ID)
 	showRes := httptest.NewRecorder()
+	showStarted := time.Now()
 	a.getShow(showRes, showReq)
+	showDuration := time.Since(showStarted)
 	var summary showSummary
 	if err = json.Unmarshal(showRes.Body.Bytes(), &summary); err != nil {
 		t.Fatal(err)
 	}
 	if showRes.Code != 200 || summary.Available != 10000 || summary.Held != 0 || summary.Confirmed != 0 || summary.TotalSeats != 10000 {
 		t.Fatalf("unexpected reconciliation response: code=%d body=%s", showRes.Code, showRes.Body.String())
+	}
+	if len(summary.Seats) != 10000 || showDuration >= time.Second {
+		t.Fatalf("10k-seat reconciliation has %d seats and took %s", len(summary.Seats), showDuration)
+	}
+	if summary.Seats[0].SeatID != "S00000" || summary.Seats[0].Status != "available" || summary.Seats[9999].SeatID != "S09999" {
+		t.Fatalf("seat list is not ordered or has unexpected status: first=%+v last=%+v", summary.Seats[0], summary.Seats[9999])
+	}
+	summaryReq := httptest.NewRequest("GET", "/shows/"+out.ID+"?summary=true", nil)
+	summaryReq.SetPathValue("id", out.ID)
+	summaryRR := httptest.NewRecorder()
+	a.getShow(summaryRR, summaryReq)
+	var summaryBody map[string]json.RawMessage
+	if err = json.Unmarshal(summaryRR.Body.Bytes(), &summaryBody); err != nil {
+		t.Fatal(err)
+	}
+	if summaryRR.Code != 200 || summaryBody["seats"] != nil {
+		t.Fatalf("summary response should omit seats: code=%d body=%s", summaryRR.Code, summaryRR.Body.String())
+	}
+	unknownReq := httptest.NewRequest("GET", "/shows/00000000-0000-4000-8000-000000000000", nil)
+	unknownReq.SetPathValue("id", "00000000-0000-4000-8000-000000000000")
+	unknownRR := httptest.NewRecorder()
+	a.getShow(unknownRR, unknownReq)
+	if unknownRR.Code != http.StatusNotFound || !strings.Contains(unknownRR.Body.String(), `"code":"show_not_found"`) {
+		t.Fatalf("unknown show response: code=%d body=%s", unknownRR.Code, unknownRR.Body.String())
 	}
 	readyRes := httptest.NewRecorder()
 	a.readyz(readyRes, httptest.NewRequest("GET", "/readyz", nil))

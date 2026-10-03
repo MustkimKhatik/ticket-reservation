@@ -1,6 +1,6 @@
 # Ticket reservation foundation
 
-The service is a Go HTTP API using MariaDB with InnoDB. It provides retrying startup migrations, process liveness and database readiness checks, request IDs and JSON logs, Prometheus metrics, HS256 JWT authentication, admin-only `POST /shows`, a one-query show/seat reconciliation endpoint, and authenticated atomic reservations and cancellations. Hold creation/expiry is not implemented yet.
+The service is a Go HTTP API using MariaDB with InnoDB. It provides retrying startup migrations, process liveness and database readiness checks, request IDs and JSON logs, Prometheus metrics, HS256 JWT authentication, admin-only `POST /shows`, a seat-row reconciliation endpoint, and authenticated atomic reservations and cancellations. Hold creation/expiry is not implemented yet.
 
 ## Deploy with Docker Compose
 
@@ -43,7 +43,7 @@ Fetch show fields and a seat-state reconciliation snapshot:
 curl http://localhost:8080/shows/<show-id>
 ```
 
-The response includes `available`, `held`, `confirmed`, and `total_seats`. The fields and counts come from one MariaDB statement so the counts share a single InnoDB statement snapshot.
+The response keeps show fields and flat `available`, `held`, `confirmed`, and `total_seats` counts, plus ordered `seats` entries containing only `seat_id` and `status`. Counts are derived from the same ordered seat-row query as the list, so both reflect one InnoDB statement snapshot. Add `?summary=true` to omit the seat list for cheaper polling. The endpoint logs a row-count mismatch while still returning its result if seat rows do not match immutable `total_seats`. The `/metrics` seat gauge also derives counts by scanning the seat rows.
 
 ## Reserve seats
 
@@ -118,4 +118,4 @@ go run .
 go test ./...
 ```
 
-HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. Tests cover 10,000-seat creation, reconciliation and metrics, rollback, pool wait behavior, 500-way hot-seat contention, concurrent per-user limits, idempotent replays/conflicts, opposite seat ordering, all-or-nothing multi-seat requests, JWT identity, owner-only cancellation, parallel cancellation, cancel/re-reserve races, and old-cancel replay safety. They verify the seat-count invariant after each reservation scenario.
+HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. Tests cover 10,000-seat creation and reconciliation, summary responses, metrics, rollback, pool wait behavior, 500-way hot-seat contention, concurrent per-user limits, idempotent replays/conflicts, opposite seat ordering, all-or-nothing multi-seat requests, JWT identity, owner-only cancellation, parallel cancellation, cancel/re-reserve races, old-cancel replay safety, and show reconciliation during concurrent reserve/cancel traffic. They verify the seat-count invariant after each reservation scenario.

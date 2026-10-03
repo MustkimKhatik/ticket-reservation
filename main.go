@@ -465,14 +465,37 @@ func (a *application) dbError(w http.ResponseWriter, r *http.Request, err error)
 func NormalizeSeatID(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
 
 type showSummary struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	PricePaise   int64  `json:"price_paise"`
-	PerUserLimit int    `json:"per_user_limit"`
-	Available    int    `json:"available"`
-	Held         int    `json:"held"`
-	Confirmed    int    `json:"confirmed"`
-	TotalSeats   int    `json:"total_seats"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	PricePaise   int64      `json:"price_paise"`
+	PerUserLimit int        `json:"per_user_limit"`
+	Available    int        `json:"available"`
+	Held         int        `json:"held"`
+	Confirmed    int        `json:"confirmed"`
+	TotalSeats   int        `json:"total_seats"`
+	Seats        []showSeat `json:"seats,omitempty"`
+}
+
+type showSeat struct {
+	SeatID string `json:"seat_id"`
+	Status string `json:"status"`
+}
+
+type seatStatusCounts struct {
+	available int
+	held      int
+	confirmed int
+}
+
+func (c *seatStatusCounts) add(status string) {
+	switch status {
+	case "available":
+		c.available++
+	case "held":
+		c.held++
+	case "confirmed":
+		c.confirmed++
+	}
 }
 
 func (a *application) getShow(w http.ResponseWriter, r *http.Request) {
@@ -492,11 +515,8 @@ func (a *application) getShow(w http.ResponseWriter, r *http.Request) {
 	stmtCtx, cancel := context.WithTimeout(ctx, a.cfg.statementTimeout)
 	defer cancel()
 	var out showSummary
-	err = conn.QueryRowContext(stmtCtx, `SELECT sh.id, sh.name, sh.price_paise, sh.per_user_limit, sh.total_seats,
-		COALESCE(SUM(se.status='available'),0), COALESCE(SUM(se.status='held'),0), COALESCE(SUM(se.status='confirmed'),0)
-		FROM shows sh LEFT JOIN seats se ON se.show_id=sh.id WHERE sh.id=?
-		GROUP BY sh.id, sh.name, sh.price_paise, sh.per_user_limit, sh.total_seats`, r.PathValue("id")).
-		Scan(&out.ID, &out.Name, &out.PricePaise, &out.PerUserLimit, &out.TotalSeats, &out.Available, &out.Held, &out.Confirmed)
+	err = conn.QueryRowContext(stmtCtx, `SELECT id, name, price_paise, per_user_limit, total_seats FROM shows WHERE id=?`, r.PathValue("id")).
+		Scan(&out.ID, &out.Name, &out.PricePaise, &out.PerUserLimit, &out.TotalSeats)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, 404, "show_not_found", "Show not found")
 		return
@@ -504,6 +524,50 @@ func (a *application) getShow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.dbError(w, r, err)
 		return
+	}
+	summaryOnly := r.URL.Query().Get("summary") == "true"
+	if !summaryOnly {
+		out.Seats = make([]showSeat, 0, out.TotalSeats)
+	}
+	counts := seatStatusCounts{}
+	stmtCtx, cancel = context.WithTimeout(ctx, a.cfg.statementTimeout)
+	rows, err := conn.QueryContext(stmtCtx, `SELECT seat_id, status FROM seats WHERE show_id=? ORDER BY seat_id`, out.ID)
+	if err != nil {
+		cancel()
+		a.dbError(w, r, err)
+		return
+	}
+	seatCount := 0
+	for rows.Next() {
+		var seatID, status string
+		if err := rows.Scan(&seatID, &status); err != nil {
+			_ = rows.Close()
+			cancel()
+			a.dbError(w, r, err)
+			return
+		}
+		seatCount++
+		counts.add(status)
+		if !summaryOnly {
+			out.Seats = append(out.Seats, showSeat{SeatID: seatID, Status: status})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		cancel()
+		a.dbError(w, r, err)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		cancel()
+		a.dbError(w, r, err)
+		return
+	}
+	cancel()
+	out.Available, out.Held, out.Confirmed = counts.available, counts.held, counts.confirmed
+	if seatCount != out.TotalSeats {
+		requestID, _ := r.Context().Value(requestIDKey{}).(string)
+		a.logger.Error("show seat row count mismatch", "request_id", requestID, "show_id", out.ID, "expected", out.TotalSeats, "actual", seatCount)
 	}
 	writeJSON(w, 200, out)
 }
@@ -519,32 +583,36 @@ func (a *application) prometheus(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	stmtCtx, cancel := context.WithTimeout(ctx, a.cfg.statementTimeout)
-	defer cancel()
-	rows, err := conn.QueryContext(stmtCtx, "SELECT status, COUNT(*) FROM seats GROUP BY status")
+	rows, err := conn.QueryContext(stmtCtx, "SELECT seat_id, status FROM seats")
 	if err != nil {
+		cancel()
 		a.dbError(w, r, err)
 		return
 	}
-	seatCounts := map[string]uint64{"available": 0, "held": 0, "confirmed": 0}
+	counts := seatStatusCounts{}
 	for rows.Next() {
-		var status string
-		var count uint64
-		if err = rows.Scan(&status, &count); err != nil {
+		var seatID, status string
+		if err = rows.Scan(&seatID, &status); err != nil {
 			_ = rows.Close()
+			cancel()
 			a.dbError(w, r, err)
 			return
 		}
-		seatCounts[status] = count
+		counts.add(status)
 	}
 	if err = rows.Err(); err != nil {
 		_ = rows.Close()
+		cancel()
 		a.dbError(w, r, err)
 		return
 	}
 	if err = rows.Close(); err != nil {
+		cancel()
 		a.dbError(w, r, err)
 		return
 	}
+	cancel()
+	seatCounts := map[string]uint64{"available": uint64(counts.available), "held": uint64(counts.held), "confirmed": uint64(counts.confirmed)}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	fmt.Fprint(w, a.metrics.render(seatCounts))
 	st := a.db.Stats()

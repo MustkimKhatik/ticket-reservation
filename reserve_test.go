@@ -475,6 +475,118 @@ func TestCancelTwoSeatReservationReleasesBoth(t *testing.T) {
 	assertShowInvariant(t, h.db, h.showID)
 }
 
+func TestShowReconcilesDuringConcurrentReserveCancelBurst(t *testing.T) {
+	const workers = 40
+	seats := make([]string, workers)
+	for i := range seats {
+		seats[i] = fmt.Sprintf("P%03d", i)
+	}
+	h := newReserveHarness(t, 4, seats)
+	stopPoll := make(chan struct{})
+	pollErr := make(chan error, 1)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+			}
+			res := h.show(false)
+			if res.err != nil {
+				select {
+				case pollErr <- res.err:
+				default:
+				}
+				return
+			}
+			if res.status != http.StatusOK {
+				select {
+				case pollErr <- fmt.Errorf("GET show returned %d: %s", res.status, res.body):
+				default:
+				}
+				return
+			}
+			var out showSummary
+			if err := json.Unmarshal(res.body, &out); err != nil {
+				select {
+				case pollErr <- err:
+				default:
+				}
+				return
+			}
+			if out.Available+out.Held+out.Confirmed != out.TotalSeats || len(out.Seats) != out.TotalSeats {
+				select {
+				case pollErr <- fmt.Errorf("inconsistent snapshot: available=%d held=%d confirmed=%d total=%d seats=%d", out.Available, out.Held, out.Confirmed, out.TotalSeats, len(out.Seats)):
+				default:
+				}
+				return
+			}
+			var listedAvailable, listedHeld, listedConfirmed int
+			for i, seat := range out.Seats {
+				if i > 0 && out.Seats[i-1].SeatID > seat.SeatID {
+					select {
+					case pollErr <- fmt.Errorf("seat list is not ordered"):
+					default:
+					}
+					return
+				}
+				switch seat.Status {
+				case "available":
+					listedAvailable++
+				case "held":
+					listedHeld++
+				case "confirmed":
+					listedConfirmed++
+				default:
+					select {
+					case pollErr <- fmt.Errorf("unexpected seat status %q", seat.Status):
+					default:
+					}
+					return
+				}
+			}
+			if listedAvailable != out.Available || listedHeld != out.Held || listedConfirmed != out.Confirmed {
+				select {
+				case pollErr <- fmt.Errorf("seat list/count mismatch: list=%d/%d/%d counts=%d/%d/%d", listedAvailable, listedHeld, listedConfirmed, out.Available, out.Held, out.Confirmed):
+				default:
+				}
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	results := parallelRequests(workers, func(i int) reserveHTTPResult {
+		user := fmt.Sprintf("poll-user-%d", i)
+		reserved := h.reserve(user, fmt.Sprintf("poll-reserve-%d", i), []string{seats[i]}, "")
+		if reserved.err != nil || reserved.status != http.StatusCreated {
+			return reserved
+		}
+		var booking reserveResponse
+		if err := json.Unmarshal(reserved.body, &booking); err != nil {
+			return reserveHTTPResult{err: err}
+		}
+		cancelled := h.cancel(user, booking.ReservationID)
+		return cancelled
+	})
+	for _, res := range results {
+		if res.err != nil || res.status != http.StatusOK {
+			t.Fatalf("reserve/cancel worker got %d: %s (%v)", res.status, res.body, res.err)
+		}
+	}
+	close(stopPoll)
+	<-pollDone
+	select {
+	case err := <-pollErr:
+		t.Fatal(err)
+	default:
+	}
+	assertShowInvariant(t, h.db, h.showID)
+	assertCancelledMetric(t, h.app.metrics, workers)
+}
+
 func (h *reserveHarness) cancel(user, reservationID string) reserveHTTPResult {
 	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/reservations/"+reservationID+"/cancel", strings.NewReader(`{"user_id":"spoofed"}`))
 	if err != nil {
@@ -483,6 +595,23 @@ func (h *reserveHarness) cancel(user, reservationID string) reserveHTTPResult {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testToken("reserve-test-secret", user, "user"))
 	res, err := h.client.Do(req)
+	if err != nil {
+		return reserveHTTPResult{err: err}
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return reserveHTTPResult{err: err}
+	}
+	return reserveHTTPResult{status: res.StatusCode, body: body}
+}
+
+func (h *reserveHarness) show(summary bool) reserveHTTPResult {
+	path := h.server.URL + "/shows/" + h.showID
+	if summary {
+		path += "?summary=true"
+	}
+	res, err := h.client.Get(path)
 	if err != nil {
 		return reserveHTTPResult{err: err}
 	}
