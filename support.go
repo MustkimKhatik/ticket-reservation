@@ -39,6 +39,7 @@ type metrics struct {
 	sums                  map[string]float64
 	bounds                []float64
 	reservationsConfirmed uint64
+	reservationsCancelled uint64
 	reservationsDeclined  map[string]uint64
 }
 
@@ -46,6 +47,7 @@ func newMetrics() *metrics {
 	return &metrics{counts: map[string]uint64{}, buckets: map[string][]uint64{}, sums: map[string]float64{}, bounds: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}, reservationsDeclined: map[string]uint64{"seat_taken": 0, "per_user_limit": 0, "idempotent_replay": 0}}
 }
 func (m *metrics) incReservationConfirmed() { m.mu.Lock(); m.reservationsConfirmed++; m.mu.Unlock() }
+func (m *metrics) incReservationCancelled() { m.mu.Lock(); m.reservationsCancelled++; m.mu.Unlock() }
 func (m *metrics) incReservationDeclined(reason string) {
 	m.mu.Lock()
 	if _, ok := m.reservationsDeclined[reason]; ok {
@@ -96,6 +98,8 @@ func (m *metrics) render(seats map[string]uint64) string {
 	}
 	s += "# HELP reservations_confirmed_total Reservations successfully confirmed.\n# TYPE reservations_confirmed_total counter\n"
 	s += fmt.Sprintf("reservations_confirmed_total %d\n", m.reservationsConfirmed)
+	s += "# HELP reservations_cancelled_total Reservations cancelled by their owner.\n# TYPE reservations_cancelled_total counter\n"
+	s += fmt.Sprintf("reservations_cancelled_total %d\n", m.reservationsCancelled)
 	s += "# HELP reservations_declined_total Reservation declines by reason.\n# TYPE reservations_declined_total counter\n"
 	for _, reason := range []string{"seat_taken", "per_user_limit", "idempotent_replay"} {
 		s += fmt.Sprintf("reservations_declined_total{reason=%q} %d\n", reason, m.reservationsDeclined[reason])

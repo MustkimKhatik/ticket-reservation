@@ -157,6 +157,7 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("GET /shows/{id}", a.getShow)
 	mux.Handle("POST /shows", a.authenticate(a.requireAdmin(http.HandlerFunc(a.createShow))))
 	mux.Handle("POST /shows/{id}/reserve", a.authenticate(http.HandlerFunc(a.reserve)))
+	mux.Handle("POST /reservations/{id}/cancel", a.authenticate(http.HandlerFunc(a.cancelReservation)))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Route not found")
 	})
@@ -195,6 +196,9 @@ func (a *application) middleware(next http.Handler) http.Handler {
 			}
 			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/shows/") && strings.HasSuffix(r.URL.Path, "/reserve") {
 				route = "/shows/{id}/reserve"
+			}
+			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/reservations/") && strings.HasSuffix(r.URL.Path, "/cancel") {
+				route = "/reservations/{id}/cancel"
 			}
 			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/shows/") {
 				route = "/shows/{id}"

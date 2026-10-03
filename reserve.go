@@ -295,6 +295,18 @@ func (a *application) reserveOnce(ctx context.Context, userID, showID, idemKey s
 	if err != nil {
 		return reserveResult{}, err
 	}
+	seatValues := make([]string, len(seats))
+	seatArgs := make([]any, 0, len(seats)*3)
+	for i, seat := range seats {
+		seatValues[i] = "(?,?,?)"
+		seatArgs = append(seatArgs, reservationID, showID, seat)
+	}
+	stmtCtx, cancel = context.WithTimeout(ctx, a.cfg.statementTimeout)
+	_, err = tx.ExecContext(stmtCtx, `INSERT INTO reservation_seats (reservation_id, show_id, seat_id) VALUES `+strings.Join(seatValues, ","), seatArgs...)
+	cancel()
+	if err != nil {
+		return reserveResult{}, err
+	}
 	stmtCtx, cancel = context.WithTimeout(ctx, a.cfg.statementTimeout)
 	updated, err := tx.ExecContext(stmtCtx, `UPDATE idempotency_keys SET response_json=?, status_code=201 WHERE user_id=? AND idem_key=?`, string(body), userID, idemKey)
 	cancel()

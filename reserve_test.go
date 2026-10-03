@@ -296,6 +296,213 @@ func TestReserveIdempotencyHeaderAndMissingSeat(t *testing.T) {
 	assertShowInvariant(t, h.db, h.showID)
 }
 
+func TestCancelOwnerReleasesSeatsForAnotherUser(t *testing.T) {
+	h := newReserveHarness(t, 4, []string{"A1", "A2"})
+	created := h.reserve("cancel-owner", "cancel-owner-key", []string{"a1"}, "")
+	if created.status != http.StatusCreated {
+		t.Fatalf("reserve returned %d: %s", created.status, created.body)
+	}
+	var reserved reserveResponse
+	if err := json.Unmarshal(created.body, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := h.cancel("cancel-owner", reserved.ReservationID)
+	if cancelled.err != nil || cancelled.status != http.StatusOK {
+		t.Fatalf("cancel returned %d, %v: %s", cancelled.status, cancelled.err, cancelled.body)
+	}
+	var out cancelResponse
+	if err := json.Unmarshal(cancelled.body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "cancelled" || len(out.Seats) != 1 || out.Seats[0] != "A1" {
+		t.Fatalf("unexpected cancel body: %+v", out)
+	}
+	other := h.reserve("another-user", "after-cancel-key", []string{"A1"}, "")
+	if other.status != http.StatusCreated {
+		t.Fatalf("another user could not reserve released seat: %d %s", other.status, other.body)
+	}
+	assertShowInvariant(t, h.db, h.showID)
+	assertCancelledMetric(t, h.app.metrics, 1)
+}
+
+func TestCancelNonOwnerGets404AndLeavesSeatsAlone(t *testing.T) {
+	h := newReserveHarness(t, 4, []string{"A1"})
+	created := h.reserve("real-owner", "owner-key", []string{"A1"}, "")
+	var reserved reserveResponse
+	if err := json.Unmarshal(created.body, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	res := h.cancel("intruder", reserved.ReservationID)
+	if res.err != nil || res.status != http.StatusNotFound {
+		t.Fatalf("non-owner cancel got %d: %s (%v)", res.status, res.body, res.err)
+	}
+	var status string
+	if err := h.db.QueryRow(`SELECT status FROM seats WHERE show_id=? AND seat_id='A1'`, h.showID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "confirmed" {
+		t.Fatalf("seat status is %q after non-owner cancel", status)
+	}
+	assertShowInvariant(t, h.db, h.showID)
+	assertCancelledMetric(t, h.app.metrics, 0)
+}
+
+func TestCancelFiftyParallelRequestsReleaseOnlyOnce(t *testing.T) {
+	h := newReserveHarness(t, 4, []string{"A1", "A2"})
+	created := h.reserve("cancel-many", "cancel-many-key", []string{"A1"}, "")
+	var reserved reserveResponse
+	if err := json.Unmarshal(created.body, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	results := parallelRequests(50, func(int) reserveHTTPResult { return h.cancel("cancel-many", reserved.ReservationID) })
+	for _, res := range results {
+		if res.err != nil || res.status != http.StatusOK {
+			t.Fatalf("parallel cancel got %d: %s (%v)", res.status, res.body, res.err)
+		}
+	}
+	var available, confirmed int
+	if err := h.db.QueryRow(`SELECT SUM(status='available'), SUM(status='confirmed') FROM seats WHERE show_id=?`, h.showID).Scan(&available, &confirmed); err != nil {
+		t.Fatal(err)
+	}
+	if available != 2 || confirmed != 0 {
+		t.Fatalf("available=%d confirmed=%d after cancels", available, confirmed)
+	}
+	assertCancelledMetric(t, h.app.metrics, 1)
+	assertShowInvariant(t, h.db, h.showID)
+}
+
+func TestCancelReplayDoesNotReleaseNewOwnersSeat(t *testing.T) {
+	h := newReserveHarness(t, 4, []string{"A1"})
+	created := h.reserve("old-owner", "old-owner-key", []string{"A1"}, "")
+	var oldReservation reserveResponse
+	if err := json.Unmarshal(created.body, &oldReservation); err != nil {
+		t.Fatal(err)
+	}
+	first := h.cancel("old-owner", oldReservation.ReservationID)
+	if first.status != http.StatusOK {
+		t.Fatalf("first cancel returned %d: %s", first.status, first.body)
+	}
+	newBooking := h.reserve("new-owner", "new-owner-key", []string{"A1"}, "")
+	if newBooking.status != http.StatusCreated {
+		t.Fatalf("new owner reserve returned %d: %s", newBooking.status, newBooking.body)
+	}
+	reserveReplay := h.reserve("old-owner", "old-owner-key", []string{"A1"}, "")
+	if reserveReplay.status != http.StatusCreated || !bytes.Equal(created.body, reserveReplay.body) {
+		t.Fatalf("old reserve key did not replay its frozen response: status=%d body=%s", reserveReplay.status, reserveReplay.body)
+	}
+	replay := h.cancel("old-owner", oldReservation.ReservationID)
+	if replay.status != http.StatusOK || !bytes.Equal(first.body, replay.body) {
+		t.Fatalf("cancel replay differs: status=%d body=%s first=%s", replay.status, replay.body, first.body)
+	}
+	var seatUser, seatStatus string
+	if err := h.db.QueryRow(`SELECT user_id,status FROM seats WHERE show_id=? AND seat_id='A1'`, h.showID).Scan(&seatUser, &seatStatus); err != nil {
+		t.Fatal(err)
+	}
+	if seatUser != "new-owner" || seatStatus != "confirmed" {
+		t.Fatalf("old cancel replay changed new booking: user=%q status=%q", seatUser, seatStatus)
+	}
+	assertCancelledMetric(t, h.app.metrics, 1)
+	assertShowInvariant(t, h.db, h.showID)
+}
+
+func TestCancelRacingRereserveIsConsistent(t *testing.T) {
+	const iterations = 20
+	seats := make([]string, iterations)
+	for i := range seats {
+		seats[i] = fmt.Sprintf("R%d", i+1)
+	}
+	h := newReserveHarness(t, 4, seats)
+	for i, seat := range seats {
+		owner := fmt.Sprintf("race-owner-%d", i)
+		created := h.reserve(owner, fmt.Sprintf("race-owner-key-%d", i), []string{seat}, "")
+		if created.status != http.StatusCreated {
+			t.Fatalf("initial reserve iteration %d got %d: %s", i, created.status, created.body)
+		}
+		var reserved reserveResponse
+		if err := json.Unmarshal(created.body, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var cancelRes, reserveRes reserveHTTPResult
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; cancelRes = h.cancel(owner, reserved.ReservationID) }()
+		go func() {
+			defer wg.Done()
+			<-start
+			reserveRes = h.reserve(fmt.Sprintf("race-new-%d", i), fmt.Sprintf("race-new-key-%d", i), []string{seat}, "")
+		}()
+		close(start)
+		wg.Wait()
+		if cancelRes.err != nil || cancelRes.status != http.StatusOK {
+			t.Fatalf("cancel race iteration %d got %d: %s (%v)", i, cancelRes.status, cancelRes.body, cancelRes.err)
+		}
+		if reserveRes.err != nil || (reserveRes.status != http.StatusCreated && reserveRes.status != http.StatusConflict) {
+			t.Fatalf("reserve race iteration %d got %d: %s (%v)", i, reserveRes.status, reserveRes.body, reserveRes.err)
+		}
+		var status, user string
+		if err := h.db.QueryRow(`SELECT status,COALESCE(user_id,'') FROM seats WHERE show_id=? AND seat_id=?`, h.showID, seat).Scan(&status, &user); err != nil {
+			t.Fatal(err)
+		}
+		if status == "confirmed" && (reserveRes.status != http.StatusCreated || user != fmt.Sprintf("race-new-%d", i)) {
+			t.Fatalf("iteration %d inconsistent final state: status=%q user=%q reserve status=%d", i, status, user, reserveRes.status)
+		}
+		if status != "available" && status != "confirmed" {
+			t.Fatalf("iteration %d final status=%q", i, status)
+		}
+		assertShowInvariant(t, h.db, h.showID)
+	}
+}
+
+func TestCancelTwoSeatReservationReleasesBoth(t *testing.T) {
+	h := newReserveHarness(t, 4, []string{"A1", "A2", "A3"})
+	created := h.reserve("two-seat-owner", "two-seat-key", []string{"A1", "A2"}, "")
+	var reserved reserveResponse
+	if err := json.Unmarshal(created.body, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	res := h.cancel("two-seat-owner", reserved.ReservationID)
+	if res.status != http.StatusOK {
+		t.Fatalf("cancel returned %d: %s", res.status, res.body)
+	}
+	var count int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM seats WHERE show_id=? AND status='available'`, h.showID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("got %d available seats, want 3", count)
+	}
+	assertShowInvariant(t, h.db, h.showID)
+}
+
+func (h *reserveHarness) cancel(user, reservationID string) reserveHTTPResult {
+	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/reservations/"+reservationID+"/cancel", strings.NewReader(`{"user_id":"spoofed"}`))
+	if err != nil {
+		return reserveHTTPResult{err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken("reserve-test-secret", user, "user"))
+	res, err := h.client.Do(req)
+	if err != nil {
+		return reserveHTTPResult{err: err}
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return reserveHTTPResult{err: err}
+	}
+	return reserveHTTPResult{status: res.StatusCode, body: body}
+}
+
+func assertCancelledMetric(t *testing.T, m *metrics, want uint64) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reservationsCancelled != want {
+		t.Fatalf("reservations_cancelled_total=%d, want %d", m.reservationsCancelled, want)
+	}
+}
+
 type reserveHarness struct {
 	db     *sql.DB
 	app    *application
