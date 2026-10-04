@@ -144,7 +144,7 @@ def reconcile(show_id, expected):
     return {"show_id": show_id, "available": body["available"], "held": body["held"], "confirmed": body["confirmed"], "total_seats": total, "listed_seats": len(seats)}
 
 
-def run():
+def run(quick=False):
     if not BASE_URL or not SECRET:
         raise RuntimeError("Set BASE_URL and JWT_SECRET, e.g. make burst BASE_URL=http://localhost:8080 JWT_SECRET=...")
     global ADMIN
@@ -189,7 +189,9 @@ def run():
     # same-key retries to make this a 20,000-request stampede in total.
     primary_jobs = []
     primary_meta = []
-    for i in range(1000):
+    primary_count = 100 if quick else 1000
+    stamp_target = 1000 if quick else 20000
+    for i in range(primary_count):
         user = f"{nonce}-stamp-{i}"
         seat = stamp_seats[i % len(stamp_seats)]
         key = f"{nonce}-stamp-key-{i}"
@@ -211,7 +213,9 @@ def run():
             raise RuntimeError(f"unexpected primary stampede outcome: {result['status']} {result['body'][:300]!r}")
     expected_metrics["confirmed"] += len(winners_meta)
     expected_metrics["seat_taken"] += stamp_taken
-    replay_count = 20000 - len(primary)
+    if not winners_meta:
+        raise RuntimeError("stampede produced no successful unique reservation keys")
+    replay_count = stamp_target - len(primary)
     retry_jobs = []
     for i in range(replay_count):
         (user, seat, key), _ = winners_meta[i % len(winners_meta)]
@@ -223,7 +227,7 @@ def run():
     if bad_replays:
         raise RuntimeError(f"stampede retry did not replay: {bad_replays[0]['status']} {bad_replays[0]['body'][:300]!r}")
     expected_metrics["idempotent_replay"] += replay_count
-    details.append({"scenario": "skewed 20k-request stampede", "requests": len(primary) + len(retries), "unique_requests": len(primary), "successful_keys": len(winners_meta), "409 seat_taken": stamp_taken, "same-key replays": replay_count})
+    details.append({"scenario": "skewed request stampede", "requests": len(primary) + len(retries), "unique_requests": len(primary), "successful_keys": len(winners_meta), "409 seat_taken": stamp_taken, "same-key replays": replay_count})
 
     # Ten distinct seat requests from one user race against a per-user limit of four.
     limit_results = parallel([lambda i=i: reserve(limit_show, token(f"{nonce}-limit-user"), [limit_seats[i]], f"{nonce}-limit-{i}") for i in range(10)])
@@ -326,9 +330,10 @@ def run():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", help="also write a Markdown summary to this path")
+    parser.add_argument("--quick", action="store_true", help="use 1,000 requests for the skewed stampede")
     args = parser.parse_args()
     try:
-        report = run()
+        report = run(quick=args.quick)
         if args.out:
             lines = ["# Reservation burst summary", "", f"- Created: {report['created_at']}", f"- Base URL: {report['base_url']}", f"- Requests: {report['requests']}", f"- Requests/sec: {report['requests_per_second']}", f"- Latency ms p50/p95/p99: {report['latency_ms']['p50']} / {report['latency_ms']['p95']} / {report['latency_ms']['p99']}", "", "## Outcome distribution", "", "```json", json.dumps(report["outcomes"], indent=2, sort_keys=True), "```", "", "## Reservation metric deltas", "", "```json", json.dumps(report["reservation_metric_delta"], indent=2, sort_keys=True), "```", "", "## Scenarios", ""]
             lines += [f"- {item['scenario']}: `{json.dumps(item, sort_keys=True)}`" for item in report["scenarios"]]

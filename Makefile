@@ -9,7 +9,10 @@ deployment-smoke:
 	@python3 scripts/deployment_smoke.py
 
 burst:
-	@python3 scripts/burst.py $(if $(OUT),--out "$(OUT)")
+	@python3 scripts/burst.py $(if $(QUICK),--quick) $(if $(OUT),--out "$(OUT)")
 
 readiness-check:
 	@python3 scripts/readiness_check.py
+
+verify-clean-clone:
+	@python3 scripts/verify_clean_clone.py

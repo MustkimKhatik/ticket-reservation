@@ -9,11 +9,8 @@ The service is a Go HTTP API using MariaDB with InnoDB. It provides retrying sta
 From the cloned repository, set production secrets, build the image, and start both services:
 
 ```sh
-export JWT_SECRET="$(openssl rand -hex 32)"
-export ADMIN_USERNAME='admin'
-export ADMIN_PASSWORD="$(openssl rand -hex 24)"
-export DB_PASSWORD="$(openssl rand -hex 24)"
-export MARIADB_ROOT_PASSWORD="$(openssl rand -hex 24)"
+cp .env.example .env
+# Edit .env and replace the placeholder JWT/admin/root passwords before deployment.
 docker compose up -d --build
 ```
 
@@ -115,6 +112,11 @@ The seat list is preserved in `reservation_seats` so cancellation replays can re
 | `REQUEST_TIMEOUT` | no | `60s` | HTTP read/write and request deadline; must exceed DB acquire timeout |
 | `READY_TIMEOUT` | no | `2s` | Short readiness ping deadline |
 | `DB_STARTUP_TIMEOUT` | no | `5s` | Timeout for each startup ping/migration attempt before retry/backoff |
+| `DB_HOST_PORT` | no | `3306` | Host port for local Compose MariaDB; the DB remains bound to localhost |
+| `DB_USER` | no | `ticket` | Integration-test database user |
+| `DB_NAME` | no | `tickets` | Integration-test database name |
+| `DB_HOST` | no | `127.0.0.1:3306` | Integration-test database host and port |
+| `TEST_DB_DSN` | no | — | Optional full DSN override for integration tests |
 
 Choose the pool size against the MariaDB `max_connections` budget across all app replicas. Compose sets MariaDB max connections to 400 and app pool maximum to 100, leaving headroom. Across multiple replicas, set each pool maximum so their combined capacity remains under the MariaDB connection limit. Requests wait up to `DB_ACQUIRE_TIMEOUT`; pool deadlines, MariaDB connection-limit errors, lock timeouts, and deadlocks return a clean 429 decline. Other DB errors return a clean 503. Driver details do not leak into responses. The DSN's driver `timeout`, `readTimeout`, and `writeTimeout` further bound connection and socket operations.
 
@@ -134,3 +136,7 @@ go test ./...
 ```
 
 HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. Tests cover 10,000-seat creation and reconciliation, summary responses, metrics, rollback, pool wait behavior, 500-way hot-seat contention, concurrent per-user limits, idempotent replays/conflicts, opposite seat ordering, all-or-nothing multi-seat requests, JWT identity, owner-only cancellation, parallel cancellation, cancel/re-reserve races, old-cancel replay safety, and show reconciliation during concurrent reserve/cancel traffic. They verify the seat-count invariant after each reservation scenario.
+
+`make burst BASE_URL=http://localhost:8080 JWT_SECRET=<local-secret>` runs the hot-seat, 20,000-request skewed stampede, per-user-limit, idempotency-conflict, and cancellation/rebooking checks. Add `OUT=docs/burst-<timestamp>.md` to save a Markdown report. `QUICK=1` reduces the stampede to 1,000 requests for clean-clone checks. The burst reads admin and user JWT signing material from `JWT_SECRET` and does not save it.
+
+`make verify-clean-clone` clones the committed `HEAD` into a temporary directory, creates a private Compose stack using `.env.example` values and free local ports, waits for readiness, runs `go test ./...`, runs a 1,000-request short burst, then removes the temporary stack and directory. It does not depend on untracked files in the working tree. Run it after committing changes so the clone includes the current code.
