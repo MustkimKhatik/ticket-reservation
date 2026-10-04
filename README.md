@@ -26,6 +26,19 @@ docker compose logs -f app
 curl http://localhost:8080/metrics
 ```
 
+### Verify readiness on the live deployment
+
+To verify the platform's fail-closed behavior, open its service dashboard and stop the MariaDB service (leave the application service running). Then request both health routes from a terminal, replacing the URL with the app's public URL:
+
+```sh
+curl -i https://<your-app-domain>/livez
+curl -i https://<your-app-domain>/readyz
+```
+
+`/livez` should remain `200`; `/readyz` should return `503` while MariaDB is unavailable. Start MariaDB again in the dashboard. `/readyz` should return `200` after the app reconnects, without restarting the application container. Do not run this check during user traffic: stopping the database temporarily interrupts reservation operations.
+
+For the equivalent local Compose check, run `make readiness-check`. It starts the stack, confirms initial readiness and liveness, stops and restarts only the `db` service, and verifies that the same app container recovers.
+
 `/metrics` exposes request counters and latency histograms by route/status class, `reservations_confirmed_total`, `reservations_cancelled_total`, `reservations_declined_total` with `reason` values `seat_taken`, `per_user_limit`, or `idempotent_replay`, DB pool statistics, and live `seats{status=...}` counts. Seat counts are queried from MariaDB with `SELECT status, COUNT(*) FROM seats GROUP BY status` at each scrape. `/readyz` pings the DB with a short timeout and returns 503 until the startup migration completes or whenever the DB is unavailable. `/livez` only checks that the process can serve HTTP and never touches the DB.
 
 Create a show with an admin bearer token:

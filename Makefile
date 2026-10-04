@@ -10,3 +10,6 @@ deployment-smoke:
 
 burst:
 	@python3 scripts/burst.py $(if $(OUT),--out "$(OUT)")
+
+readiness-check:
+	@python3 scripts/readiness_check.py
