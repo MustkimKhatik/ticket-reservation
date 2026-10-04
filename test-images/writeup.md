@@ -1,5 +1,8 @@
-1. set the URL; create tokens
+1. set the URL;
 ![alt text](image.png)
+
+create tokens
+![alt text](image-19.png)
 
 2. Check health and authentication
 Both should return 200.
