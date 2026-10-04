@@ -21,7 +21,7 @@ Use the app's public Railway domain, not the MariaDB private domain. Remove any 
 BASE_URL='https://ticket-reservation-production-e646.up.railway.app'
 BASE_URL="${BASE_URL%/}"
 
-export JWT_SECRET='46f60d927e283ed45302a9f8550c58b3a8630be3dbef281fa8fd2c2ed71496e2'
+export JWT_SECRET='refer mail'
 printf 'JWT secret set: %s; length: %s\n' "${JWT_SECRET:+yes}" "${#JWT_SECRET}"
 ```
 
