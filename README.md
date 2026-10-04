@@ -1,3 +1,5 @@
+Refer test-images folder to access test proofs inside writeup.md
+
 # Ticket reservation foundation
 
 The service is a Go HTTP API using MariaDB with InnoDB. It provides retrying startup migrations, process liveness and database readiness checks, request IDs and JSON logs, Prometheus metrics, HS256 JWT authentication, admin-only `POST /shows`, a seat-row reconciliation endpoint, and authenticated atomic reservations and cancellations. Hold creation/expiry is not implemented yet.
