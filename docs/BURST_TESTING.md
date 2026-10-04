@@ -46,7 +46,7 @@ docker compose --env-file .env logs --tail=200 app db
 If you opened a new terminal, load the matching local secret before running the test:
 
 ```bash
-cd ~/Documents/ChatGPT/ticket-reservation
+cd root of project
 JWT_SECRET="$(sed -n 's/^JWT_SECRET=//p' .env)"
 make burst BASE_URL=http://localhost:8080 JWT_SECRET="$JWT_SECRET" OUT=docs/burst-local.md
 ```

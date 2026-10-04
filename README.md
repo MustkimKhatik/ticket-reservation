@@ -178,14 +178,15 @@ make burst BASE_URL=http://localhost:8080 JWT_SECRET="$JWT_SECRET" OUT=docs/burs
 Use the deployed app's public URL and the current `JWT_SECRET` configured on that app service. Do not use the local `.env` secret. In Bash, enter the secret when prompted so it is not typed literally into shell history:
 
 ```bash
-BASE_URL='https://<your-app-domain>'
+cd into root of project
+BASE_URL='https://ticket-reservation-production-e646.up.railway.app'
 read -rsp 'Deployed app JWT_SECRET: ' JWT_SECRET
 printf '\n'
 curl -i "${BASE_URL%/}/livez"
 curl -i "${BASE_URL%/}/readyz"
 ```
 
-When both health checks return 200, run the burst and save the report locally:
+Paste the current `JWT_SECRET` configured in Railway's app service when prompted. Continue only when both health checks return `200`. Then run the burst and save the report locally:
 
 ```bash
 make burst BASE_URL="${BASE_URL%/}" JWT_SECRET="$JWT_SECRET" OUT=docs/burst-deployed.md
