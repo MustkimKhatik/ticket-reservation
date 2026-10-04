@@ -137,6 +137,61 @@ go test ./...
 
 HTTP/auth/validation tests run without a database. MariaDB integration tests use `TEST_DB_DSN`, or the `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_NAME` variables (defaults target the Compose database). They skip when MariaDB is unavailable. Tests cover 10,000-seat creation and reconciliation, summary responses, metrics, rollback, pool wait behavior, 500-way hot-seat contention, concurrent per-user limits, idempotent replays/conflicts, opposite seat ordering, all-or-nothing multi-seat requests, JWT identity, owner-only cancellation, parallel cancellation, cancel/re-reserve races, old-cancel replay safety, and show reconciliation during concurrent reserve/cancel traffic. They verify the seat-count invariant after each reservation scenario.
 
-`make burst BASE_URL=http://localhost:8080 JWT_SECRET=<local-secret>` runs the hot-seat, 20,000-request skewed stampede, per-user-limit, idempotency-conflict, and cancellation/rebooking checks. Add `OUT=docs/burst-<timestamp>.md` to save a Markdown report. `QUICK=1` reduces the stampede to 1,000 requests for clean-clone checks. The burst reads admin and user JWT signing material from `JWT_SECRET` and does not save it.
+### Run the burst verification script
+
+The `make burst` target runs the hot-seat storm, 20,000-request skewed-seat stampede with same-key retries, per-user-limit race, idempotency conflict, and cancel/rebook churn. It reports response counts, latency percentiles, throughput, metric deltas, and seat reconciliation. It uses up to 128 workers, so 20,000 is the request count, not the number of simultaneous connections. New test shows and reservations remain in the target database after the run.
+
+#### Against the local Docker Compose app
+
+From the repository root, create local settings, generate a local-only JWT secret, and recreate the stack so the app uses that secret:
+
+```bash
+cp -n .env.example .env
+JWT_SECRET="$(openssl rand -hex 32)"
+sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$JWT_SECRET/" .env
+docker compose --env-file .env up --build -d --force-recreate
+```
+
+Wait for readiness and run the test against localhost with the same secret:
+
+```bash
+until curl -fsS http://localhost:8080/readyz >/dev/null; do sleep 2; done
+make burst BASE_URL=http://localhost:8080 JWT_SECRET="$JWT_SECRET" OUT=docs/burst-local.md
+```
+
+View results and stop the local containers when finished:
+
+```bash
+cat docs/burst-local.md
+docker compose --env-file .env stop
+```
+
+If using a new terminal, load the app's local secret before running the burst:
+
+```bash
+JWT_SECRET="$(sed -n 's/^JWT_SECRET=//p' .env)"
+make burst BASE_URL=http://localhost:8080 JWT_SECRET="$JWT_SECRET" OUT=docs/burst-local.md
+```
+
+#### Against the deployed app
+
+Use the deployed app's public URL and the current `JWT_SECRET` configured on that app service. Do not use the local `.env` secret. In Bash, enter the secret when prompted so it is not typed literally into shell history:
+
+```bash
+BASE_URL='https://<your-app-domain>'
+read -rsp 'Deployed app JWT_SECRET: ' JWT_SECRET
+printf '\n'
+curl -i "${BASE_URL%/}/livez"
+curl -i "${BASE_URL%/}/readyz"
+```
+
+When both health checks return 200, run the burst and save the report locally:
+
+```bash
+make burst BASE_URL="${BASE_URL%/}" JWT_SECRET="$JWT_SECRET" OUT=docs/burst-deployed.md
+unset JWT_SECRET
+```
+
+The deployed run adds test shows and reservations to the live database and generates substantial traffic. Run it only when that is acceptable. The metric-delta check assumes no unrelated reservations are occurring during the run and that both `/metrics` scrapes reach the same app metrics process; multiple replicas behind a load balancer can make those deltas differ. Reports are local files; deployed runtime logs are viewed in the hosting platform's app logs.
 
 `make verify-clean-clone` clones the committed `HEAD` into a temporary directory, creates a private Compose stack using `.env.example` values and free local ports, waits for readiness, runs `go test ./...`, runs a 1,000-request short burst, then removes the temporary stack and directory. It does not depend on untracked files in the working tree. Run it after committing changes so the clone includes the current code.
